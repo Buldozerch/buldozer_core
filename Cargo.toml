@@ -1,0 +1,78 @@
+[package]
+name = "buldozer_core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+readme = "README.md"
+description = "Reusable worker core: TUI shell, settings, files bootstrap, wallet DB, and proxy-aware runner"
+license = "MIT"
+documentation = "https://docs.rs/buldozer_core"
+
+keywords = ["tui", "ratatui", "worker", "sqlite", "sqlcipher"]
+categories = ["command-line-interface", "development-tools"]
+
+exclude = ["target/**", "Cargo.lock"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = [
+    "bootstrap",
+    "db",
+    "evm",
+    "files",
+    "git_update",
+    "http_wallet",
+    "logger",
+    "run_utils",
+    "wallet_db",
+    "settings_core",
+    "settings_file",
+    "settings_template",
+    "worker_settings",
+    "worker_run",
+    "tui",
+]
+
+bootstrap = ["files", "logger", "settings_core"]
+
+db = ["dep:sqlx", "dep:libsqlite3-sys"]
+evm = ["dep:k256", "dep:alloy-primitives"]
+http_wallet = ["dep:reqwest", "dep:rand"]
+files = ["settings_template"]
+git_update = []
+logger = ["dep:tokio"]
+run_utils = ["dep:rand", "dep:tokio"]
+settings_core = ["dep:serde"]
+settings_file = ["dep:toml", "dep:serde"]
+settings_template = ["dep:toml_edit"]
+tui = ["dep:crossterm", "dep:ratatui", "dep:tokio", "git_update", "logger"]
+wallet_db = ["db", "files", "dep:tokio"]
+worker_settings = ["settings_core", "dep:serde"]
+worker_run = [
+    "worker_settings",
+    "wallet_db",
+    "http_wallet",
+    "run_utils",
+    "dep:futures",
+    "dep:tokio",
+]
+
+[dependencies]
+log = { version = "0.4.29", features = ["std"] }
+
+crossterm = { version = "0.28.1", optional = true }
+alloy-primitives = { version = "1.5.7", optional = true }
+k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"], optional = true }
+libsqlite3-sys = { version = "0.30.1", features = ["bundled-sqlcipher-vendored-openssl"], optional = true }
+rand = { version = "0.10.0", optional = true }
+ratatui = { version = "0.29.0", optional = true }
+reqwest = { version = "0.13.2", features = ["json"], optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+futures = { version = "0.3.32", optional = true }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "macros"], optional = true }
+tokio = { version = "1.50.0", features = ["rt", "sync", "time"], optional = true }
+toml_edit = { version = "0.25.8", optional = true }
+toml = { version = "1.1.0", optional = true }
