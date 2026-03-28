@@ -45,6 +45,7 @@ pub struct WorkerTuiParams {
     pub db_max_connections: u32,
     pub wallet_db_config: WalletDbConfig,
     pub header: WorkerHeader,
+    pub actions: Vec<String>,
 }
 
 impl WorkerTuiParams {
@@ -64,12 +65,19 @@ impl WorkerTuiParams {
             db_max_connections: 10,
             wallet_db_config,
             header: WorkerHeader::default(),
+            actions: Vec::new(),
         }
     }
 
     /// Overrides header text.
     pub fn with_header(mut self, header: WorkerHeader) -> Self {
         self.header = header;
+        self
+    }
+
+    /// Sets the list of project actions shown in the main menu.
+    pub fn with_actions(mut self, actions: Vec<String>) -> Self {
+        self.actions = actions;
         self
     }
 }
@@ -84,7 +92,7 @@ pub async fn start_worker_tui<RunFn, RunFut>(
     run_fn: RunFn,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    RunFn: Fn(WalletDb) -> RunFut + Send + Sync + 'static,
+    RunFn: Fn(usize, WalletDb) -> RunFut + Send + Sync + 'static,
     RunFut: std::future::Future<Output = Result<(), String>> + Send + 'static,
 {
     let state = WorkerState {
@@ -118,7 +126,7 @@ struct WorkerApp;
 
 impl<RunFn, RunFut> MenuApp<WorkerState<RunFn>> for WorkerApp
 where
-    RunFn: Fn(WalletDb) -> RunFut + Send + Sync + 'static,
+    RunFn: Fn(usize, WalletDb) -> RunFut + Send + Sync + 'static,
     RunFut: std::future::Future<Output = Result<(), String>> + Send + 'static,
 {
     fn header_lines(&self, state: &WorkerState<RunFn>, tick: u64) -> Vec<Line<'static>> {
@@ -165,16 +173,20 @@ where
     fn menu_view(
         &self,
         state: &WorkerState<RunFn>,
-        _running_label: Option<&'static str>,
+        _running_label: Option<&str>,
     ) -> MenuView {
         match state.screen {
             Screen::Main => MenuView {
                 title: "Menu".to_string(),
-                items: vec![
-                    Line::from("DB Actions"),
-                    Line::from(state.params.title),
-                    Line::from("Exit"),
-                ],
+                items: {
+                    let mut items = Vec::with_capacity(2 + state.params.actions.len());
+                    items.push(Line::from("DB Actions"));
+                    for a in &state.params.actions {
+                        items.push(Line::from(a.clone()));
+                    }
+                    items.push(Line::from("Exit"));
+                    items
+                },
                 selected: state.main_selected,
             },
             Screen::DbActions => MenuView {
@@ -206,8 +218,15 @@ where
         match screen {
             Screen::Main => match main_selected {
                 0 => ctx.state().screen = Screen::DbActions,
-                1 => spawn_run(ctx),
-                _ => ctx.quit(),
+                x => {
+                    let actions_len = ctx.state_ref().params.actions.len();
+                    // Actions are [1..=actions_len], Exit is actions_len + 1.
+                    if x >= 1 && x <= actions_len {
+                        spawn_run_idx(ctx, x - 1);
+                    } else {
+                        ctx.quit();
+                    }
+                }
             },
             Screen::DbActions => match db_selected {
                 0 => spawn_db_import(ctx),
@@ -226,7 +245,7 @@ where
 
 fn spawn_db_import<RunFn, RunFut>(ctx: &mut ShellContext<'_, WorkerState<RunFn>>)
 where
-    RunFn: Fn(WalletDb) -> RunFut + Send + Sync + 'static,
+    RunFn: Fn(usize, WalletDb) -> RunFut + Send + Sync + 'static,
     RunFut: std::future::Future<Output = Result<(), String>> + Send + 'static,
 {
     if let Some(db) = ctx.state_ref().db.clone() {
@@ -274,7 +293,7 @@ where
 
 fn spawn_db_sync<RunFn, RunFut>(ctx: &mut ShellContext<'_, WorkerState<RunFn>>)
 where
-    RunFn: Fn(WalletDb) -> RunFut + Send + Sync + 'static,
+    RunFn: Fn(usize, WalletDb) -> RunFut + Send + Sync + 'static,
     RunFut: std::future::Future<Output = Result<(), String>> + Send + 'static,
 {
     if let Some(db) = ctx.state_ref().db.clone() {
@@ -320,15 +339,23 @@ where
     });
 }
 
-fn spawn_run<RunFn, RunFut>(ctx: &mut ShellContext<'_, WorkerState<RunFn>>)
+fn spawn_run_idx<RunFn, RunFut>(ctx: &mut ShellContext<'_, WorkerState<RunFn>>, action_idx: usize)
 where
-    RunFn: Fn(WalletDb) -> RunFut + Send + Sync + 'static,
+    RunFn: Fn(usize, WalletDb) -> RunFut + Send + Sync + 'static,
     RunFut: std::future::Future<Output = Result<(), String>> + Send + 'static,
 {
+    let action_name = ctx
+        .state_ref()
+        .params
+        .actions
+        .get(action_idx)
+        .cloned()
+        .unwrap_or_else(|| format!("Action {}", action_idx + 1));
+
     if let Some(db) = ctx.state_ref().db.clone() {
         let run_fn = std::sync::Arc::clone(&ctx.state_ref().run_fn);
-        ctx.spawn_task("Run", async move {
-            (*run_fn)(db).await?;
+        ctx.spawn_task(action_name, async move {
+            (*run_fn)(action_idx, db).await?;
             Ok(TaskOutcome::Done)
         });
         return;
@@ -340,12 +367,12 @@ where
     let run_fn = std::sync::Arc::clone(&ctx.state_ref().run_fn);
 
     if ctx.state_ref().params.db_encryption {
-        ctx.prompt_secret("Run", "DB Password", "Run".to_string(), move |pw| {
+        ctx.prompt_secret(action_name, "DB Password", "Run".to_string(), move |pw| {
             Box::pin(async move {
                 let db = WalletDb::init(&url, Some(&pw), max, cfg)
                     .await
                     .map_err(|e| e.to_string())?;
-                (*run_fn)(db.clone()).await?;
+                (*run_fn)(action_idx, db.clone()).await?;
                 Ok(TaskOutcome::UpdateState(Box::new(move |st: &mut WorkerState<RunFn>| {
                     st.db = Some(db);
                 })))
@@ -354,11 +381,11 @@ where
         return;
     }
 
-    ctx.spawn_task("Run", async move {
+    ctx.spawn_task(action_name, async move {
         let db = WalletDb::init(&url, None, max, cfg)
             .await
             .map_err(|e| e.to_string())?;
-        (*run_fn)(db.clone()).await?;
+        (*run_fn)(action_idx, db.clone()).await?;
         Ok(TaskOutcome::UpdateState(Box::new(move |st: &mut WorkerState<RunFn>| {
             st.db = Some(db);
         })))

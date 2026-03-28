@@ -26,7 +26,7 @@ pub enum TaskOutcome<S> {
 pub type ShellFuture<S> = Pin<Box<dyn Future<Output = Result<TaskOutcome<S>, String>> + Send>>;
 
 struct RunningTask<S> {
-    label: &'static str,
+    label: String,
     handle: tokio::task::JoinHandle<Result<TaskOutcome<S>, String>>,
     started_at: std::time::Instant,
 }
@@ -148,7 +148,7 @@ struct SecretPrompt<S> {
     title: &'static str,
     action: String,
     buf: String,
-    label: &'static str,
+    label: String,
     build: Option<Box<dyn FnOnce(String) -> ShellFuture<S> + Send>>,
 }
 
@@ -165,8 +165,8 @@ impl<'a, S> ShellContext<'a, S> {
         &self.inner.state
     }
 
-    pub fn running_label(&self) -> Option<&'static str> {
-        self.inner.running.as_ref().map(|r| r.label)
+    pub fn running_label(&self) -> Option<&str> {
+        self.inner.running.as_ref().map(|r| r.label.as_str())
     }
 
     pub fn quit(&mut self) {
@@ -178,7 +178,7 @@ impl<'a, S> ShellContext<'a, S> {
         self.inner.quit = true;
     }
 
-    pub fn spawn_task<Fut>(&mut self, label: &'static str, fut: Fut)
+    pub fn spawn_task<Fut>(&mut self, label: impl Into<String>, fut: Fut)
     where
         Fut: std::future::Future<Output = Result<TaskOutcome<S>, String>> + Send + 'static,
         S: Send + 'static,
@@ -186,6 +186,7 @@ impl<'a, S> ShellContext<'a, S> {
         if self.inner.running.is_some() {
             return;
         }
+        let label = label.into();
         self.inner.running_viz.reset_for_run();
         log::info!("{}: start", label);
         let handle = tokio::spawn(fut);
@@ -196,7 +197,13 @@ impl<'a, S> ShellContext<'a, S> {
         });
     }
 
-    pub fn prompt_secret<F>(&mut self, label: &'static str, title: &'static str, action: String, f: F)
+    pub fn prompt_secret<F>(
+        &mut self,
+        label: impl Into<String>,
+        title: &'static str,
+        action: String,
+        f: F,
+    )
     where
         F: FnOnce(String) -> ShellFuture<S> + Send + 'static,
         S: Send + 'static,
@@ -204,6 +211,7 @@ impl<'a, S> ShellContext<'a, S> {
         if self.inner.secret_prompt.is_some() {
             return;
         }
+        let label = label.into();
         self.inner.secret_prompt = Some(SecretPrompt {
             title,
             action,
@@ -228,7 +236,7 @@ pub struct MenuView {
 pub trait MenuApp<S>: Send {
     fn header_lines(&self, state: &S, tick: u64) -> Vec<Line<'static>>;
 
-    fn menu_view(&self, state: &S, running_label: Option<&'static str>) -> MenuView;
+    fn menu_view(&self, state: &S, running_label: Option<&str>) -> MenuView;
 
     fn menu_selected_mut<'a>(&mut self, state: &'a mut S) -> &'a mut usize;
 
@@ -514,7 +522,7 @@ fn render_running_viz<S>(f: &mut Frame<'_>, area: Rect, shell: &mut ShellState<S
     let label = shell
         .running
         .as_ref()
-        .map(|r| r.label)
+        .map(|r| r.label.as_str())
         .unwrap_or("Run");
 
     let started = shell
@@ -724,7 +732,7 @@ where
                 return;
             }
 
-            let label = p.label;
+            let label = std::mem::take(&mut p.label);
             let build = p.build.take();
             shell.secret_prompt = None;
             let Some(build) = build else {
@@ -820,7 +828,7 @@ where
         horizontal: 2,
     });
 
-    let view = app.menu_view(&shell.state, shell.running.as_ref().map(|r| r.label));
+    let view = app.menu_view(&shell.state, shell.running.as_ref().map(|r| r.label.as_str()));
     let sel = if view.items.is_empty() {
         0
     } else {

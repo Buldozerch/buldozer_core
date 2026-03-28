@@ -118,7 +118,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         DB_URL.to_string(),
         settings.main.core.db_encryption,
         wallet_db_config(),
-    );
+    )
+    .with_actions(vec![
+        "Start Mint".to_string(),
+        "Withdraw ETH".to_string(),
+    ]);
 
     // Optional: customize header text.
     // let params = params.with_header(buldozer_core::worker_tui::WorkerHeader {
@@ -126,8 +130,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     extra_lines: vec!["Hello".to_string(), "World".to_string()],
     // });
 
-    buldozer_core::worker_tui::start_worker_tui(params, log_rx, |db| async move {
-        crate::run::run(&db).await.map_err(|e| e.to_string())
+    buldozer_core::worker_tui::start_worker_tui(params, log_rx, |action, db| async move {
+        match action {
+            0 => crate::run::run(&db).await.map_err(|e| e.to_string()),
+            1 => crate::run::run(&db).await.map_err(|e| e.to_string()),
+            _ => Err("unknown action".into()),
+        }
     })
     .await?;
 
