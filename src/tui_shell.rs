@@ -855,21 +855,32 @@ where
 
 fn render_logs<S>(f: &mut Frame<'_>, area: Rect, shell: &mut ShellState<S>) {
     let block = Block::default()
-        .title("Logs (PgUp/PgDn scroll, End follow, c cancel task, q exit)")
+        .title("Logs (wrap, PgUp/PgDn scroll, End follow, c cancel task, q exit)")
         .borders(Borders::ALL);
 
     let inner = block.inner(area);
-    let height = inner.height as usize;
 
-    let total = shell.logs.len();
-    let max_scroll = total.saturating_sub(height) as u16;
+    let lines = shell.logs.iter().map(render_log_line).collect::<Vec<_>>();
+
+    // Approximate max scroll in wrapped lines.
+    let wrap_w = inner.width.max(1) as usize;
+    let total_lines: usize = lines
+        .iter()
+        .map(|l| {
+            let w = l.width().max(1);
+            (w + wrap_w - 1) / wrap_w
+        })
+        .sum();
+
+    let height = inner.height as usize;
+    let max_scroll = total_lines.saturating_sub(height) as u16;
     if shell.follow_bottom || shell.log_scroll > max_scroll {
         shell.log_scroll = max_scroll;
     }
 
-    let text = Text::from(shell.logs.iter().map(render_log_line).collect::<Vec<_>>());
-    let p = Paragraph::new(text)
+    let p = Paragraph::new(Text::from(lines))
         .block(block)
+        .wrap(Wrap { trim: false })
         .scroll((shell.log_scroll, 0));
     f.render_widget(p, area);
 }

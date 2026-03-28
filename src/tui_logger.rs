@@ -82,6 +82,7 @@ impl Log for TuiLogger {
 
                 if fl.w.write_all(msg.as_bytes()).is_ok() {
                     fl.bytes_written = fl.bytes_written.saturating_add(msg_len);
+                    let _ = fl.w.flush();
                 }
             }
         }
