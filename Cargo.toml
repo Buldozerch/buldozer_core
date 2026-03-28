@@ -1,6 +1,6 @@
 [package]
 name = "buldozer_core"
-version = "0.1.41"
+version = "0.1.42"
 edition = "2024"
 rust-version = "1.85"
 readme = "README.md"
@@ -43,7 +43,7 @@ evm = ["dep:k256", "dep:alloy-primitives"]
 http_wallet = ["dep:reqwest", "dep:rand"]
 files = ["settings_template"]
 git_update = []
-logger = ["dep:tokio"]
+logger = ["dep:tokio", "dep:time"]
 run_utils = ["dep:rand", "dep:tokio"]
 settings_core = ["dep:serde"]
 settings_file = ["dep:toml", "dep:serde"]
@@ -80,5 +80,6 @@ serde = { version = "1.0.228", features = ["derive"], optional = true }
 futures = { version = "0.3.32", optional = true }
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "macros"], optional = true }
 tokio = { version = "1.50.0", features = ["rt", "sync", "time"], optional = true }
+time = { version = "0.3.44", features = ["formatting", "parsing", "local-offset"], optional = true }
 toml_edit = { version = "0.25.8", optional = true }
 toml = { version = "1.1.0", optional = true }

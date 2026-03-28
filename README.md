@@ -60,6 +60,11 @@ pub const PROXY_FILE_NAME: &str = "proxy.txt";
 pub const RESERVE_PROXY_FILE_NAME: &str = "reserve_proxy.txt";
 pub const SETTINGS_TEMPLATE_TOML: &str = include_str!("settings_template.toml");
 
+// Log timestamp format (local time) for the built-in TUI logger.
+// Uses time-rs format description syntax (recommended, v2):
+// https://time-rs.github.io/book/api/format-description.html
+pub const LOG_TS: &str = "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]";
+
 pub const DB_URL: &str = "sqlite://./files/wallets.db?mode=rwc";
 
 pub fn wallet_db_config() -> WalletDbConfig {
@@ -105,11 +110,12 @@ use crate::config::{load_settings, wallet_db_config, DB_URL};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (settings, log_rx) = buldozer_core::bootstrap::init(
+    let (settings, log_rx) = buldozer_core::bootstrap::init_with_ts(
         &crate::config::files_layout(),
         env!("CARGO_PKG_NAME"),
         || load_settings(),
         |s| s.main.core.log_level_filter(),
+        |_| crate::config::LOG_TS,
     )?;
 
     let params = buldozer_core::worker_tui::WorkerTuiParams::new(

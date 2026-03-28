@@ -75,6 +75,7 @@ struct RunningViz {
 
     // Last seen log line during the current run.
     last_level: Option<log::Level>,
+    last_ts: Option<String>,
     last_text: Option<String>,
 }
 
@@ -91,6 +92,7 @@ impl Default for RunningViz {
             last_rate_sample: now,
             logs_per_sec_hist: Vec::with_capacity(120),
             last_level: None,
+            last_ts: None,
             last_text: None,
         }
     }
@@ -107,6 +109,7 @@ impl RunningViz {
         self.last_rate_sample = std::time::Instant::now();
         self.logs_per_sec_hist.clear();
         self.last_level = None;
+        self.last_ts = None;
         self.last_text = None;
     }
 
@@ -119,6 +122,7 @@ impl RunningViz {
         }
 
         self.last_level = Some(line.level);
+        self.last_ts = Some(line.ts.clone());
         self.last_text = Some(line.text.clone());
     }
 
@@ -618,8 +622,12 @@ fn render_running_viz<S>(f: &mut Frame<'_>, area: Rect, shell: &mut ShellState<S
     ]))
     .block(Block::default().title("Activity").borders(Borders::ALL));
 
-    let last = match (&shell.running_viz.last_level, &shell.running_viz.last_text) {
-        (Some(level), Some(text)) => {
+    let last = match (
+        &shell.running_viz.last_level,
+        &shell.running_viz.last_ts,
+        &shell.running_viz.last_text,
+    ) {
+        (Some(level), Some(ts), Some(text)) => {
             let (lbl, style) = match level {
                 log::Level::Error => ("ERR", Style::default().fg(Color::Red)),
                 log::Level::Warn => ("WRN", Style::default().fg(Color::Yellow)),
@@ -629,8 +637,9 @@ fn render_running_viz<S>(f: &mut Frame<'_>, area: Rect, shell: &mut ShellState<S
             };
             let s = truncate_with_ellipsis(text, cols[2].width.saturating_sub(2) as usize);
             Line::from(vec![
+                Span::styled(format!("{ts} "), style),
                 Span::styled(format!("[{lbl}] "), style),
-                Span::styled(s, Style::default().fg(Color::White)),
+                Span::styled(s, style),
             ])
         }
         _ => Line::from(Span::styled("(no logs yet)", Style::default().fg(Color::Gray))),
@@ -879,7 +888,10 @@ fn render_log_line(l: &LogLine) -> Line<'static> {
         style = Style::default().fg(Color::Green);
     }
 
-    Line::from(Span::styled(format!("[{}] {}", l.level, msg), style))
+    Line::from(vec![
+        Span::styled(format!("{} ", l.ts), style),
+        Span::styled(format!("[{}] {}", l.level, msg), style),
+    ])
 }
 
 fn render_update_prompt(f: &mut Frame<'_>, info: &UpdateInfo) {
