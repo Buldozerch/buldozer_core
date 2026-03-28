@@ -85,7 +85,7 @@ pub fn files_layout() -> FilesLayout<'static> {
     })
 }
 
-pub type Settings = buldozer_core::worker_settings::WorkerSettings;
+pub type Settings = buldozer_core::settings_file::SettingsFile;
 
 pub fn load_settings() -> Result<Settings, Box<dyn std::error::Error + Send + Sync>> {
     let path = std::path::Path::new(FILES_DIR).join(SETTINGS_FILE_NAME);
@@ -109,14 +109,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &crate::config::files_layout(),
         env!("CARGO_PKG_NAME"),
         || load_settings(),
-        |s| s.core.log_level_filter(),
+        |s| s.main.core.log_level_filter(),
     )?;
 
     let params = buldozer_core::worker_tui::WorkerTuiParams::new(
         env!("CARGO_PKG_NAME"),
-        settings.core.check_git_updates,
+        settings.main.core.check_git_updates,
         DB_URL.to_string(),
-        settings.core.db_encryption,
+        settings.main.core.db_encryption,
         wallet_db_config(),
     );
 
@@ -135,6 +135,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### src/settings_template.toml
+
+`WorkerSettings` live under the `[main]` table. Your project-specific sections can be added next to it.
+
+```toml
+[main]
+threads = 10
+random_sleep_start_wallet_min = 0
+random_sleep_start_wallet_max = 60
+retry = 3
+
+# core settings (flattened into `[main]`)
+log_level = "info"
+check_git_updates = true
+db_encryption = false
+
+range_wallets_to_run = [0, 0]
+shuffle_wallets = true
+exact_wallets_to_run = []
+show_wallet_full_logs = false
+
+# [rpc]
+# url = "https://..."
+```
+
 ### src/run.rs
 
 This is where your per-wallet logic is applied.
@@ -149,6 +174,7 @@ use std::path::Path;
 
 pub async fn run(db: &WalletDb) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let settings = load_settings()?;
+    let main = &settings.main;
     let reserve_file = Path::new(FILES_DIR)
         .join(RESERVE_PROXY_FILE_NAME)
         .to_str()
@@ -165,19 +191,19 @@ pub async fn run(db: &WalletDb) -> Result<(), Box<dyn std::error::Error + Send +
      .map_err(|e| format!("prepare wallets: {e}"))?;
 
     stream::iter(ready.iter())
-        .for_each_concurrent(settings.threads, |w| async {
-             buldozer_core::run_utils::random_sleep_s(
+        .for_each_concurrent(main.threads, |w| async {
+            buldozer_core::run_utils::random_sleep_s(
                 &w.http.log_name,
-                 settings.random_sleep_start_wallet_min,
-                 settings.random_sleep_start_wallet_max,
-             )
-             .await;
+                main.random_sleep_start_wallet_min,
+                main.random_sleep_start_wallet_max,
+            )
+            .await;
 
             // `w.main_data` contains the DB main data (e.g. Web3 private key).
             if let Err(e) = send_wl(&w.http).await {
                 log::error!("{} failed: {}", w.http.log_name, e);
              }
-         })
+        })
         .await;
 
     Ok(())
@@ -191,12 +217,12 @@ Settings are loaded from `files/settings.toml`.
 The template is merged automatically (missing keys are added, existing values preserved).
 
 Key settings:
-- `threads`: concurrency for the per-wallet job stream
-- `retry`: how many reserve proxies to try (in addition to primary)
-- `random_sleep_start_wallet_*`: random delay before starting a wallet
-- `range_wallets_to_run`, `exact_wallets_to_run`, `shuffle_wallets`: wallet selection
-- `show_wallet_full_logs`: whether to show full identity in logs or `[id]`
-- `log_level`, `check_git_updates`, `db_encryption`: core behavior
+- `[main].threads`: concurrency for the per-wallet job stream
+- `[main].retry`: how many reserve proxies to try (in addition to primary)
+- `[main].random_sleep_start_wallet_*`: random delay before starting a wallet
+- `[main].range_wallets_to_run`, `[main].exact_wallets_to_run`, `[main].shuffle_wallets`: wallet selection
+- `[main].show_wallet_full_logs`: whether to show full identity in logs or `[id]`
+- `[main].log_level`, `[main].check_git_updates`, `[main].db_encryption`: core behavior
 
 ## Files / import / sync
 
