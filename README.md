@@ -230,6 +230,8 @@ Settings are loaded from `files/settings.toml`.
 
 The template is merged automatically (missing keys are added, existing values preserved).
 
+Logs are saved automatically to `files/logs/` (one file per run).
+
 Key settings:
 - `[main].threads`: concurrency for the per-wallet job stream
 - `[main].retry`: how many reserve proxies to try (in addition to primary)

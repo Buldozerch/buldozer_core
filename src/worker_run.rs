@@ -97,7 +97,7 @@ pub fn build_seed_tasks(
         };
 
         let log_name = if settings.show_wallet_full_logs {
-            build_identity_for_log(main_data_kind, &row, &address)
+            build_full_log_name_parts(row.id, main_data_kind, &row.main_data, &address)
         } else {
             format!("[{}]", row.id)
         };
@@ -147,13 +147,7 @@ fn build_seed_tasks_and_main_data(
         };
 
         let log_name = if settings.show_wallet_full_logs {
-            match main_data_kind {
-                MainDataKind::Steam | MainDataKind::Email => main_data
-                    .split_once(':')
-                    .map(|(l, _)| l.to_string())
-                    .unwrap_or_else(|| main_data.clone()),
-                MainDataKind::Web3 | MainDataKind::SimpleWeb3 => address.clone(),
-            }
+            build_full_log_name_parts(id, main_data_kind, &main_data, &address)
         } else {
             format!("[{}]", id)
         };
@@ -304,13 +298,22 @@ pub async fn prepare_wallets_from_reserve_file(
     Ok(ready)
 }
 
-fn build_identity_for_log(kind: MainDataKind, row: &WalletView, resolved_address: &str) -> String {
+fn build_identity_for_log_parts(kind: MainDataKind, main_data: &str, resolved_address: &str) -> String {
     match kind {
-        MainDataKind::Steam | MainDataKind::Email => row
-            .main_data
+        MainDataKind::Steam | MainDataKind::Email => main_data
             .split_once(':')
             .map(|(l, _)| l.to_string())
-            .unwrap_or_else(|| row.main_data.clone()),
+            .unwrap_or_else(|| main_data.to_string()),
         MainDataKind::Web3 | MainDataKind::SimpleWeb3 => resolved_address.to_string(),
     }
+}
+
+fn build_full_log_name_parts(
+    id: i64,
+    kind: MainDataKind,
+    main_data: &str,
+    resolved_address: &str,
+) -> String {
+    let identity = build_identity_for_log_parts(kind, main_data, resolved_address);
+    format!("[{id}] {identity}")
 }

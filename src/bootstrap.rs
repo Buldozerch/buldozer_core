@@ -43,10 +43,17 @@ where
 {
     crate::files::ensure_files_layout(layout)?;
     let settings = load_settings()?;
-    let log_rx = crate::tui_logger::init_tui_logger_with_ts(
+
+    // Ensure `files/logs/` exists even if the project used a custom layout.
+    std::fs::create_dir_all(layout.root_dir.join("logs"))?;
+    let log_path = crate::tui_logger::default_log_file_path(&layout.root_dir, crate_prefix)
+        .map_err(std::io::Error::other)?;
+
+    let log_rx = crate::tui_logger::init_tui_logger_with_ts_and_file(
         get_level(&settings),
         crate_prefix,
         get_ts_format(&settings),
+        Some(log_path),
     )
     .map_err(|e| std::io::Error::other(e))?;
     Ok((settings, log_rx))

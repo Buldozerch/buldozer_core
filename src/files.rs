@@ -40,7 +40,7 @@ pub struct WalletFilesLayoutParams {
 /// The result can be passed to [`ensure_files_layout`].
 pub fn wallet_files_layout(p: WalletFilesLayoutParams) -> FilesLayout<'static> {
     let mut files = vec![p.proxy_file_name, p.reserve_proxy_file_name];
-    let mut dirs: Vec<&'static str> = Vec::new();
+    let mut dirs: Vec<&'static str> = vec!["logs"];
 
     match p.main_data_kind {
         MainDataKind::SimpleWeb3 => files.push("wallets.txt"),
