@@ -14,6 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Main,
+    Actions,
     DbActions,
 }
 
@@ -98,6 +99,7 @@ where
     let state = WorkerState {
         screen: Screen::Main,
         main_selected: 0,
+        actions_selected: 0,
         db_selected: 0,
         db: None,
         params,
@@ -115,6 +117,7 @@ where
 struct WorkerState<RunFn> {
     screen: Screen,
     main_selected: usize,
+    actions_selected: usize,
     db_selected: usize,
 
     db: Option<WalletDb>,
@@ -178,16 +181,24 @@ where
         match state.screen {
             Screen::Main => MenuView {
                 title: "Menu".to_string(),
+                items: vec![
+                    Line::from("DB Actions"),
+                    Line::from(state.params.title),
+                    Line::from("Exit"),
+                ],
+                selected: state.main_selected,
+            },
+            Screen::Actions => MenuView {
+                title: "Project Actions".to_string(),
                 items: {
-                    let mut items = Vec::with_capacity(2 + state.params.actions.len());
-                    items.push(Line::from("DB Actions"));
+                    let mut items = Vec::with_capacity(state.params.actions.len() + 1);
                     for a in &state.params.actions {
                         items.push(Line::from(a.clone()));
                     }
-                    items.push(Line::from("Exit"));
+                    items.push(Line::from("Back"));
                     items
                 },
-                selected: state.main_selected,
+                selected: state.actions_selected,
             },
             Screen::DbActions => MenuView {
                 title: "DB Actions".to_string(),
@@ -205,6 +216,7 @@ where
         let screen = state.screen;
         match screen {
             Screen::Main => &mut state.main_selected,
+            Screen::Actions => &mut state.actions_selected,
             Screen::DbActions => &mut state.db_selected,
         }
     }
@@ -218,16 +230,18 @@ where
         match screen {
             Screen::Main => match main_selected {
                 0 => ctx.state().screen = Screen::DbActions,
-                x => {
-                    let actions_len = ctx.state_ref().params.actions.len();
-                    // Actions are [1..=actions_len], Exit is actions_len + 1.
-                    if x >= 1 && x <= actions_len {
-                        spawn_run_idx(ctx, x - 1);
-                    } else {
-                        ctx.quit();
-                    }
-                }
+                1 => ctx.state().screen = Screen::Actions,
+                _ => ctx.quit(),
             },
+            Screen::Actions => {
+                let sel = ctx.state_ref().actions_selected;
+                let actions_len = ctx.state_ref().params.actions.len();
+                if sel < actions_len {
+                    spawn_run_idx(ctx, sel);
+                } else {
+                    ctx.state().screen = Screen::Main;
+                }
+            }
             Screen::DbActions => match db_selected {
                 0 => spawn_db_import(ctx),
                 1 => spawn_db_sync(ctx),
@@ -237,8 +251,11 @@ where
     }
 
     fn on_esc(&mut self, ctx: &mut ShellContext<'_, WorkerState<RunFn>>) {
-        if ctx.state_ref().screen == Screen::DbActions {
-            ctx.state().screen = Screen::Main;
+        match ctx.state_ref().screen {
+            Screen::Main => {}
+            Screen::Actions | Screen::DbActions => {
+                ctx.state().screen = Screen::Main;
+            }
         }
     }
 }
