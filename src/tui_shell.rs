@@ -61,6 +61,9 @@ struct ShellState<S> {
 struct RunningViz {
     // Per-run counters (reset on spawn_task).
     logs_total: u64,
+    traces_total: u64,
+    debugs_total: u64,
+    infos_total: u64,
     warns_total: u64,
     errs_total: u64,
 
@@ -69,14 +72,9 @@ struct RunningViz {
     rate_anchor_logs_total: u64,
     logs_per_sec: f32,
 
-    // History for a tiny ASCII sparkline (scaled logs/s * 10).
-    last_rate_sample: std::time::Instant,
-    logs_per_sec_hist: Vec<u64>,
-
-    // Last seen log line during the current run.
-    last_level: Option<log::Level>,
-    last_ts: Option<String>,
-    last_text: Option<String>,
+    // Last warning/error during the current run.
+    last_warn: Option<(String, String)>, // (ts, text)
+    last_err: Option<(String, String)>,  // (ts, text)
 }
 
 impl Default for RunningViz {
@@ -84,16 +82,16 @@ impl Default for RunningViz {
         let now = std::time::Instant::now();
         Self {
             logs_total: 0,
+            traces_total: 0,
+            debugs_total: 0,
+            infos_total: 0,
             warns_total: 0,
             errs_total: 0,
             rate_anchor: now,
             rate_anchor_logs_total: 0,
             logs_per_sec: 0.0,
-            last_rate_sample: now,
-            logs_per_sec_hist: Vec::with_capacity(120),
-            last_level: None,
-            last_ts: None,
-            last_text: None,
+            last_warn: None,
+            last_err: None,
         }
     }
 }
@@ -101,29 +99,33 @@ impl Default for RunningViz {
 impl RunningViz {
     fn reset_for_run(&mut self) {
         self.logs_total = 0;
+        self.traces_total = 0;
+        self.debugs_total = 0;
+        self.infos_total = 0;
         self.warns_total = 0;
         self.errs_total = 0;
         self.rate_anchor = std::time::Instant::now();
         self.rate_anchor_logs_total = 0;
         self.logs_per_sec = 0.0;
-        self.last_rate_sample = std::time::Instant::now();
-        self.logs_per_sec_hist.clear();
-        self.last_level = None;
-        self.last_ts = None;
-        self.last_text = None;
+        self.last_warn = None;
+        self.last_err = None;
     }
 
     fn on_log_line(&mut self, line: &LogLine) {
         self.logs_total = self.logs_total.saturating_add(1);
         match line.level {
-            log::Level::Error => self.errs_total = self.errs_total.saturating_add(1),
-            log::Level::Warn => self.warns_total = self.warns_total.saturating_add(1),
-            _ => {}
+            log::Level::Trace => self.traces_total = self.traces_total.saturating_add(1),
+            log::Level::Debug => self.debugs_total = self.debugs_total.saturating_add(1),
+            log::Level::Error => {
+                self.errs_total = self.errs_total.saturating_add(1);
+                self.last_err = Some((line.ts.clone(), line.text.clone()));
+            }
+            log::Level::Warn => {
+                self.warns_total = self.warns_total.saturating_add(1);
+                self.last_warn = Some((line.ts.clone(), line.text.clone()));
+            }
+            log::Level::Info => self.infos_total = self.infos_total.saturating_add(1),
         }
-
-        self.last_level = Some(line.level);
-        self.last_ts = Some(line.ts.clone());
-        self.last_text = Some(line.text.clone());
     }
 
     fn on_tick(&mut self) {
@@ -136,15 +138,7 @@ impl RunningViz {
         self.rate_anchor = std::time::Instant::now();
         self.rate_anchor_logs_total = self.logs_total;
 
-        if self.last_rate_sample.elapsed() >= Duration::from_millis(250) {
-            self.last_rate_sample = std::time::Instant::now();
-            let v = (self.logs_per_sec * 10.0).round().max(0.0) as u64;
-            self.logs_per_sec_hist.push(v);
-            if self.logs_per_sec_hist.len() > 120 {
-                let over = self.logs_per_sec_hist.len() - 120;
-                self.logs_per_sec_hist.drain(0..over);
-            }
-        }
+        // no history tracking
     }
 }
 
@@ -556,7 +550,7 @@ fn render_running_viz<S>(f: &mut Frame<'_>, area: Rect, shell: &mut ShellState<S
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2),
-            Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Min(1),
         ])
         .split(inner);
@@ -585,74 +579,87 @@ fn render_running_viz<S>(f: &mut Frame<'_>, area: Rect, shell: &mut ShellState<S
     f.render_widget(Paragraph::new(Text::from(header)), rows[0]);
 
     // Metrics row
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(rows[1]);
+    let lf = log::max_level();
 
-    let totals = Paragraph::new(Text::from(vec![
-        Line::from(Span::styled(
-            format!("logs: {}", shell.running_viz.logs_total),
-            Style::default().fg(Color::White),
-        )),
+    let mut counter_spans: Vec<Span<'static>> = Vec::with_capacity(12);
+    counter_spans.push(Span::styled(
+        format!("logs: {}  ", shell.running_viz.logs_total),
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+    ));
+    if lf >= log::LevelFilter::Trace {
+        counter_spans.push(Span::styled(
+            format!("trace: {}  ", shell.running_viz.traces_total),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    if lf >= log::LevelFilter::Debug {
+        counter_spans.push(Span::styled(
+            format!("debug: {}  ", shell.running_viz.debugs_total),
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    if lf >= log::LevelFilter::Info {
+        counter_spans.push(Span::styled(
+            format!("info: {}  ", shell.running_viz.infos_total),
+            Style::default().fg(Color::LightBlue),
+        ));
+    }
+    if lf >= log::LevelFilter::Warn {
+        counter_spans.push(Span::styled(
+            format!("warn: {}  ", shell.running_viz.warns_total),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if lf >= log::LevelFilter::Error {
+        counter_spans.push(Span::styled(
+            format!("err: {}", shell.running_viz.errs_total),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let summary = Paragraph::new(Text::from(vec![
+        Line::from(counter_spans),
         Line::from(vec![
             Span::styled(
-                format!("warn: {}  ", shell.running_viz.warns_total),
-                Style::default().fg(Color::Yellow),
+                "Last warning: ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("err: {}", shell.running_viz.errs_total),
+                shell
+                    .running_viz
+                    .last_warn
+                    .as_ref()
+                    .map(|(ts, text)| {
+                        let s = format!("{} {}", ts, text);
+                        truncate_with_ellipsis(&s, 160)
+                    })
+                    .unwrap_or_else(|| "(none)".to_string()),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "Last error:   ",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                shell
+                    .running_viz
+                    .last_err
+                    .as_ref()
+                    .map(|(ts, text)| {
+                        let s = format!("{} {}", ts, text);
+                        truncate_with_ellipsis(&s, 160)
+                    })
+                    .unwrap_or_else(|| "(none)".to_string()),
+                Style::default().fg(Color::Red),
             ),
         ]),
     ]))
-    .block(Block::default().title("Totals").borders(Borders::ALL));
+    .block(Block::default().title("Counters").borders(Borders::ALL))
+    .wrap(Wrap { trim: false });
 
-    let rate_hist = ascii_sparkline(&shell.running_viz.logs_per_sec_hist, cols[1].width as usize);
-    let hist = Paragraph::new(Text::from(vec![
-        Line::from(Span::styled(
-            "logs/s history (x10)",
-            Style::default().fg(Color::Gray),
-        )),
-        Line::from(Span::styled(rate_hist, Style::default().fg(Color::Cyan))),
-    ]))
-    .block(Block::default().title("Activity").borders(Borders::ALL));
-
-    let last = match (
-        &shell.running_viz.last_level,
-        &shell.running_viz.last_ts,
-        &shell.running_viz.last_text,
-    ) {
-        (Some(level), Some(ts), Some(text)) => {
-            let (lbl, style) = match level {
-                log::Level::Error => ("ERR", Style::default().fg(Color::Red)),
-                log::Level::Warn => ("WRN", Style::default().fg(Color::Yellow)),
-                log::Level::Info => ("INF", Style::default().fg(Color::LightBlue)),
-                log::Level::Debug => ("DBG", Style::default().fg(Color::Gray)),
-                log::Level::Trace => ("TRC", Style::default().fg(Color::DarkGray)),
-            };
-            let s = truncate_with_ellipsis(text, cols[2].width.saturating_sub(2) as usize);
-            Line::from(vec![
-                Span::styled(format!("{ts} "), style),
-                Span::styled(format!("[{lbl}] "), style),
-                Span::styled(s, style),
-            ])
-        }
-        _ => Line::from(Span::styled("(no logs yet)", Style::default().fg(Color::Gray))),
-    };
-    let last_p = Paragraph::new(Text::from(vec![
-        Line::from(Span::styled("last line", Style::default().fg(Color::Gray))),
-        last,
-    ]))
-    .block(Block::default().title("Last Log").borders(Borders::ALL));
-
-    f.render_widget(totals, cols[0]);
-    f.render_widget(hist, cols[1]);
-    f.render_widget(last_p, cols[2]);
+    f.render_widget(summary, rows[1]);
 
     // Footer / hints
     let footer = Paragraph::new(Text::from(vec![Line::from(vec![
@@ -663,33 +670,6 @@ fn render_running_viz<S>(f: &mut Frame<'_>, area: Rect, shell: &mut ShellState<S
         ),
     ])]));
     f.render_widget(footer, rows[2]);
-}
-
-fn ascii_sparkline(data: &[u64], width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    if data.is_empty() {
-        return ".".repeat(width);
-    }
-
-    const CH: [char; 9] = ['.', ':', '-', '=', '+', '*', '#', '%', '@'];
-    let slice = if data.len() > width {
-        &data[data.len() - width..]
-    } else {
-        data
-    };
-    let max = slice.iter().copied().max().unwrap_or(1).max(1);
-
-    let mut out = String::with_capacity(width);
-    if slice.len() < width {
-        out.push_str(&" ".repeat(width - slice.len()));
-    }
-    for &v in slice {
-        let idx = ((v.saturating_mul((CH.len() - 1) as u64)) / max) as usize;
-        out.push(CH[idx.min(CH.len() - 1)]);
-    }
-    out
 }
 
 fn truncate_with_ellipsis(s: &str, max: usize) -> String {
