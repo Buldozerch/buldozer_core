@@ -156,27 +156,28 @@ pub async fn run(db: &WalletDb) -> Result<(), Box<dyn std::error::Error + Send +
         .to_string();
 
     let ready = buldozer_core::worker_run::prepare_wallets_from_reserve_file(
-        db,
-        &settings,
-        &reserve_file,
-        WalletClientOptions::default(),
-    )
-    .await
-    .map_err(|e| format!("prepare wallets: {e}"))?;
+         db,
+         &settings,
+         &reserve_file,
+         WalletClientOptions::default(),
+     )
+     .await
+     .map_err(|e| format!("prepare wallets: {e}"))?;
 
     stream::iter(ready.iter())
         .for_each_concurrent(settings.threads, |w| async {
-            buldozer_core::run_utils::random_sleep_s(
-                &w.log_name,
-                settings.random_sleep_start_wallet_min,
-                settings.random_sleep_start_wallet_max,
-            )
-            .await;
+             buldozer_core::run_utils::random_sleep_s(
+                &w.http.log_name,
+                 settings.random_sleep_start_wallet_min,
+                 settings.random_sleep_start_wallet_max,
+             )
+             .await;
 
-            if let Err(e) = send_wl(w).await {
-                log::error!("{} failed: {}", w.log_name, e);
-            }
-        })
+            // `w.main_data` contains the DB main data (e.g. Web3 private key).
+            if let Err(e) = send_wl(&w.http).await {
+                log::error!("{} failed: {}", w.http.log_name, e);
+             }
+         })
         .await;
 
     Ok(())

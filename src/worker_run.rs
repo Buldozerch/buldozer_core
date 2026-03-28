@@ -12,7 +12,7 @@ use crate::wallet_db::{MainDataKind, WalletView};
 use crate::worker_settings::WorkerSettings;
 use futures::stream::{self, StreamExt};
 use rand::seq::SliceRandom;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::files;
@@ -23,6 +23,29 @@ pub struct SeedTask {
     pub id: i64,
     pub original_proxy: String,
     pub seed: WalletSeed,
+}
+
+/// A fully prepared wallet ready for runtime use.
+///
+/// This is a higher-level type than [`crate::net_wallet::Wallet`]: it keeps the
+/// initialized proxy-bound HTTP client as well as the original `main_data` from DB.
+///
+/// Security: do not `Debug` this type (it may hold private keys).
+#[derive(Clone)]
+pub struct RuntimeWallet {
+    pub id: i64,
+
+    /// DB main data.
+    /// - `Web3`: private key
+    /// - `SimpleWeb3`: address
+    /// - `Email`/`Steam`: corresponding account data
+    pub main_data: String,
+
+    /// Resolved identity address used by the HTTP wallet.
+    pub address: String,
+
+    /// Initialized proxy-bound HTTP client.
+    pub http: Wallet,
 }
 
 /// Filters + optionally shuffles wallet rows based on settings.
@@ -94,6 +117,66 @@ pub fn build_seed_tasks(
     out
 }
 
+fn build_seed_tasks_and_main_data(
+    rows: Vec<WalletView>,
+    settings: &WorkerSettings,
+    main_data_kind: MainDataKind,
+) -> (Vec<SeedTask>, HashMap<i64, String>) {
+    let mut tasks = Vec::with_capacity(rows.len());
+    let mut main_data_by_id: HashMap<i64, String> = HashMap::with_capacity(rows.len());
+
+    for row in rows {
+        let id = row.id;
+        let main_data = row.main_data;
+
+        let proxy = match row.proxy {
+            Some(p) => p,
+            None => {
+                log::warn!("wallet {} has no proxy", id);
+                continue;
+            }
+        };
+
+        let address = match (main_data_kind, row.address) {
+            (MainDataKind::Web3, None) => {
+                log::warn!("wallet {} has no address yet; skip", id);
+                continue;
+            }
+            (_, Some(a)) => a,
+            (_, None) => main_data.clone(),
+        };
+
+        let log_name = if settings.show_wallet_full_logs {
+            match main_data_kind {
+                MainDataKind::Steam | MainDataKind::Email => main_data
+                    .split_once(':')
+                    .map(|(l, _)| l.to_string())
+                    .unwrap_or_else(|| main_data.clone()),
+                MainDataKind::Web3 | MainDataKind::SimpleWeb3 => address.clone(),
+            }
+        } else {
+            format!("[{}]", id)
+        };
+
+        tasks.push(SeedTask {
+            id,
+            original_proxy: proxy.clone(),
+            seed: WalletSeed {
+                id,
+                address,
+                proxy,
+                log_name,
+            },
+        });
+
+        // Keep `main_data` only for wallets that we actually run.
+        let prev = main_data_by_id.insert(id, main_data);
+        debug_assert!(prev.is_none());
+    }
+
+    (tasks, main_data_by_id)
+}
+
 pub async fn init_wallets(
     tasks: Vec<SeedTask>,
     reserve: Arc<Vec<String>>,
@@ -150,7 +233,7 @@ pub async fn prepare_wallets_from_reserve_file(
     settings: &WorkerSettings,
     reserve_proxy_file: &str,
     client_opts: WalletClientOptions,
-) -> Result<Vec<Wallet>, String> {
+) -> Result<Vec<RuntimeWallet>, String> {
     let reserve = files::read_lines(reserve_proxy_file).map_err(|e| e.to_string())?;
     let reserve = Arc::new(reserve);
 
@@ -160,7 +243,8 @@ pub async fn prepare_wallets_from_reserve_file(
     }
 
     let rows = select_rows(rows, settings);
-    let tasks = build_seed_tasks(rows, settings, db.cfg().main_data_kind);
+    let (tasks, mut main_data_by_id) =
+        build_seed_tasks_and_main_data(rows, settings, db.cfg().main_data_kind);
     if tasks.is_empty() {
         return Ok(Vec::new());
     }
@@ -192,7 +276,21 @@ pub async fn prepare_wallets_from_reserve_file(
                 .map_err(|e| e.to_string())?;
             changed += 1;
         }
-        ready.push(w);
+        let main_data = match main_data_by_id.remove(&id) {
+            Some(v) => v,
+            None => {
+                return Err(format!(
+                    "internal error: missing main_data for initialized wallet id={id}"
+                ))
+            }
+        };
+        let address = w.address.clone();
+        ready.push(RuntimeWallet {
+            id,
+            main_data,
+            address,
+            http: w,
+        });
     }
     if changed > 0 {
         log::info!("updated proxy in db for {changed} wallets");
