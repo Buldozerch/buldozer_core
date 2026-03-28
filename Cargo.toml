@@ -48,7 +48,13 @@ run_utils = ["dep:rand", "dep:tokio"]
 settings_core = ["dep:serde"]
 settings_file = ["dep:toml", "dep:serde"]
 settings_template = ["dep:toml_edit"]
-tui = ["dep:crossterm", "dep:ratatui", "dep:tokio", "git_update", "logger"]
+tui = [
+    "dep:crossterm",
+    "dep:ratatui",
+    "dep:tokio",
+    "git_update",
+    "logger",
+]
 wallet_db = ["db", "files", "dep:tokio"]
 worker_settings = ["settings_core", "dep:serde"]
 worker_run = [

@@ -28,6 +28,7 @@ pub type ShellFuture<S> = Pin<Box<dyn Future<Output = Result<TaskOutcome<S>, Str
 struct RunningTask<S> {
     label: &'static str,
     handle: tokio::task::JoinHandle<Result<TaskOutcome<S>, String>>,
+    started_at: std::time::Instant,
 }
 
 struct ShellState<S> {
@@ -52,6 +53,95 @@ struct ShellState<S> {
     logs: VecDeque<LogLine>,
     log_scroll: u16,
     follow_bottom: bool,
+
+    // Status panel shown in the bottom panel while a task is running.
+    running_viz: RunningViz,
+}
+
+struct RunningViz {
+    // Per-run counters (reset on spawn_task).
+    logs_total: u64,
+    warns_total: u64,
+    errs_total: u64,
+
+    // Rate calculation.
+    rate_anchor: std::time::Instant,
+    rate_anchor_logs_total: u64,
+    logs_per_sec: f32,
+
+    // History for a tiny ASCII sparkline (scaled logs/s * 10).
+    last_rate_sample: std::time::Instant,
+    logs_per_sec_hist: Vec<u64>,
+
+    // Last seen log line during the current run.
+    last_level: Option<log::Level>,
+    last_text: Option<String>,
+}
+
+impl Default for RunningViz {
+    fn default() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            logs_total: 0,
+            warns_total: 0,
+            errs_total: 0,
+            rate_anchor: now,
+            rate_anchor_logs_total: 0,
+            logs_per_sec: 0.0,
+            last_rate_sample: now,
+            logs_per_sec_hist: Vec::with_capacity(120),
+            last_level: None,
+            last_text: None,
+        }
+    }
+}
+
+impl RunningViz {
+    fn reset_for_run(&mut self) {
+        self.logs_total = 0;
+        self.warns_total = 0;
+        self.errs_total = 0;
+        self.rate_anchor = std::time::Instant::now();
+        self.rate_anchor_logs_total = 0;
+        self.logs_per_sec = 0.0;
+        self.last_rate_sample = std::time::Instant::now();
+        self.logs_per_sec_hist.clear();
+        self.last_level = None;
+        self.last_text = None;
+    }
+
+    fn on_log_line(&mut self, line: &LogLine) {
+        self.logs_total = self.logs_total.saturating_add(1);
+        match line.level {
+            log::Level::Error => self.errs_total = self.errs_total.saturating_add(1),
+            log::Level::Warn => self.warns_total = self.warns_total.saturating_add(1),
+            _ => {}
+        }
+
+        self.last_level = Some(line.level);
+        self.last_text = Some(line.text.clone());
+    }
+
+    fn on_tick(&mut self) {
+        let elapsed = self.rate_anchor.elapsed();
+        if elapsed < Duration::from_millis(800) {
+            return;
+        }
+        let delta_logs = self.logs_total.saturating_sub(self.rate_anchor_logs_total);
+        self.logs_per_sec = (delta_logs as f32) / (elapsed.as_secs_f32().max(0.001));
+        self.rate_anchor = std::time::Instant::now();
+        self.rate_anchor_logs_total = self.logs_total;
+
+        if self.last_rate_sample.elapsed() >= Duration::from_millis(250) {
+            self.last_rate_sample = std::time::Instant::now();
+            let v = (self.logs_per_sec * 10.0).round().max(0.0) as u64;
+            self.logs_per_sec_hist.push(v);
+            if self.logs_per_sec_hist.len() > 120 {
+                let over = self.logs_per_sec_hist.len() - 120;
+                self.logs_per_sec_hist.drain(0..over);
+            }
+        }
+    }
 }
 
 struct SecretPrompt<S> {
@@ -96,9 +186,14 @@ impl<'a, S> ShellContext<'a, S> {
         if self.inner.running.is_some() {
             return;
         }
+        self.inner.running_viz.reset_for_run();
         log::info!("{}: start", label);
         let handle = tokio::spawn(fut);
-        self.inner.running = Some(RunningTask { label, handle });
+        self.inner.running = Some(RunningTask {
+            label,
+            handle,
+            started_at: std::time::Instant::now(),
+        });
     }
 
     pub fn prompt_secret<F>(&mut self, label: &'static str, title: &'static str, action: String, f: F)
@@ -176,6 +271,7 @@ where
         logs: VecDeque::with_capacity(2048),
         log_scroll: 0,
         follow_bottom: true,
+        running_viz: RunningViz::default(),
     };
 
     if params.check_git_updates {
@@ -263,9 +359,14 @@ where
             }
         }
 
+        if shell.running.is_some() {
+            shell.running_viz.on_tick();
+        }
+
         terminal.draw(|f| ui(f, shell, app, params))?;
 
-        if !event::poll(Duration::from_millis(100))? {
+        let poll_ms = if shell.running.is_some() { 33 } else { 100 };
+        if !event::poll(Duration::from_millis(poll_ms))? {
             continue;
         }
         let ev = event::read()?;
@@ -298,6 +399,7 @@ where
             _ => {}
         }
 
+        // While a task is running we block menu navigation keys.
         if shell.running.is_some() {
             continue;
         }
@@ -358,6 +460,9 @@ where
 }
 
 fn push_log<S>(shell: &mut ShellState<S>, line: LogLine) {
+    if shell.running.is_some() {
+        shell.running_viz.on_log_line(&line);
+    }
     if shell.logs.len() == 2000 {
         shell.logs.pop_front();
     }
@@ -369,18 +474,19 @@ where
     A: MenuApp<S>,
 {
     let size = f.area();
+    let bottom_h = if shell.running.is_some() { 10 } else { 7 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(9),
             Constraint::Min(10),
-            Constraint::Length(7),
+            Constraint::Length(bottom_h),
         ])
         .split(size);
 
     render_header(f, chunks[0], shell, app, params.title);
     render_logs(f, chunks[1], shell);
-    render_menu(f, chunks[2], shell, app);
+    render_bottom(f, chunks[2], shell, app);
 
     if let Some(info) = &shell.update_prompt {
         render_update_prompt(f, info);
@@ -391,6 +497,209 @@ where
     }
 
     app.render_overlays(f, size, &shell.state);
+}
+
+fn render_bottom<S, A>(f: &mut Frame<'_>, area: Rect, shell: &mut ShellState<S>, app: &A)
+where
+    A: MenuApp<S>,
+{
+    if shell.running.is_some() {
+        render_running_viz(f, area, shell);
+    } else {
+        render_menu(f, area, shell, app);
+    }
+}
+
+fn render_running_viz<S>(f: &mut Frame<'_>, area: Rect, shell: &mut ShellState<S>) {
+    let label = shell
+        .running
+        .as_ref()
+        .map(|r| r.label)
+        .unwrap_or("Run");
+
+    let started = shell
+        .running
+        .as_ref()
+        .map(|r| r.started_at)
+        .unwrap_or_else(std::time::Instant::now);
+    let elapsed = started.elapsed();
+
+    let spinner = match shell.header_tick % 4 {
+        0 => "|",
+        1 => "/",
+        2 => "-",
+        _ => "\\",
+    };
+
+    let block = Block::default()
+        .title(format!("Status | {label}"))
+        .borders(Borders::ALL);
+    f.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    if inner.height < 6 || inner.width < 20 {
+        return;
+    }
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    // Header
+    let header = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("RUNNING {spinner} "),
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("elapsed={} ", format_elapsed(elapsed)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!("rate={:.1}/s", shell.running_viz.logs_per_sec),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "c cancel  q quit  pgup/pgdn scroll logs",
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+    f.render_widget(Paragraph::new(Text::from(header)), rows[0]);
+
+    // Metrics row
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(rows[1]);
+
+    let totals = Paragraph::new(Text::from(vec![
+        Line::from(Span::styled(
+            format!("logs: {}", shell.running_viz.logs_total),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(vec![
+            Span::styled(
+                format!("warn: {}  ", shell.running_viz.warns_total),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!("err: {}", shell.running_viz.errs_total),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ]))
+    .block(Block::default().title("Totals").borders(Borders::ALL));
+
+    let rate_hist = ascii_sparkline(&shell.running_viz.logs_per_sec_hist, cols[1].width as usize);
+    let hist = Paragraph::new(Text::from(vec![
+        Line::from(Span::styled(
+            "logs/s history (x10)",
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(Span::styled(rate_hist, Style::default().fg(Color::Cyan))),
+    ]))
+    .block(Block::default().title("Activity").borders(Borders::ALL));
+
+    let last = match (&shell.running_viz.last_level, &shell.running_viz.last_text) {
+        (Some(level), Some(text)) => {
+            let (lbl, style) = match level {
+                log::Level::Error => ("ERR", Style::default().fg(Color::Red)),
+                log::Level::Warn => ("WRN", Style::default().fg(Color::Yellow)),
+                log::Level::Info => ("INF", Style::default().fg(Color::LightBlue)),
+                log::Level::Debug => ("DBG", Style::default().fg(Color::Gray)),
+                log::Level::Trace => ("TRC", Style::default().fg(Color::DarkGray)),
+            };
+            let s = truncate_with_ellipsis(text, cols[2].width.saturating_sub(2) as usize);
+            Line::from(vec![
+                Span::styled(format!("[{lbl}] "), style),
+                Span::styled(s, Style::default().fg(Color::White)),
+            ])
+        }
+        _ => Line::from(Span::styled("(no logs yet)", Style::default().fg(Color::Gray))),
+    };
+    let last_p = Paragraph::new(Text::from(vec![
+        Line::from(Span::styled("last line", Style::default().fg(Color::Gray))),
+        last,
+    ]))
+    .block(Block::default().title("Last Log").borders(Borders::ALL));
+
+    f.render_widget(totals, cols[0]);
+    f.render_widget(hist, cols[1]);
+    f.render_widget(last_p, cols[2]);
+
+    // Footer / hints
+    let footer = Paragraph::new(Text::from(vec![Line::from(vec![
+        Span::styled("Tip: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            "use PageUp/PageDown to browse logs while running",
+            Style::default().fg(Color::Gray),
+        ),
+    ])]));
+    f.render_widget(footer, rows[2]);
+}
+
+fn ascii_sparkline(data: &[u64], width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if data.is_empty() {
+        return ".".repeat(width);
+    }
+
+    const CH: [char; 9] = ['.', ':', '-', '=', '+', '*', '#', '%', '@'];
+    let slice = if data.len() > width {
+        &data[data.len() - width..]
+    } else {
+        data
+    };
+    let max = slice.iter().copied().max().unwrap_or(1).max(1);
+
+    let mut out = String::with_capacity(width);
+    if slice.len() < width {
+        out.push_str(&" ".repeat(width - slice.len()));
+    }
+    for &v in slice {
+        let idx = ((v.saturating_mul((CH.len() - 1) as u64)) / max) as usize;
+        out.push(CH[idx.min(CH.len() - 1)]);
+    }
+    out
+}
+
+fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.len() <= max {
+        return s.to_string();
+    }
+    if max <= 3 {
+        return s[..max].to_string();
+    }
+    let mut out = s[..(max - 3)].to_string();
+    out.push_str("...");
+    out
+}
+
+fn format_elapsed(d: Duration) -> String {
+    let s = d.as_secs();
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let sec = s % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{sec:02}")
+    } else {
+        format!("{m:02}:{sec:02}")
+    }
 }
 
 fn handle_secret_prompt<S>(shell: &mut ShellState<S>, code: KeyCode)
@@ -424,7 +733,12 @@ where
 
             log::info!("{}: start", label);
             let handle = tokio::spawn(build(secret));
-            shell.running = Some(RunningTask { label, handle });
+            shell.running_viz.reset_for_run();
+            shell.running = Some(RunningTask {
+                label,
+                handle,
+                started_at: std::time::Instant::now(),
+            });
         }
         KeyCode::Char(c) => {
             if !c.is_control() {
