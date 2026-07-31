@@ -40,7 +40,7 @@ impl Default for WalletClientOptions {
         Self {
             connect_timeout_s: 30,
             request_timeout_s: 30,
-            proxy_check_url: "https://httpbin.org/ip".to_string(),
+            proxy_check_url: "https://ifconfig.me/ip".to_string(),
             proxy_check_timeout_s: 3,
         }
     }
